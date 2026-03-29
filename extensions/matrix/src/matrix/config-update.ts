@@ -1,5 +1,7 @@
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
-import { normalizeAccountId } from "../runtime-api.js";
+import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import { coerceSecretRef } from "openclaw/plugin-sdk/config-runtime";
+import { normalizeSecretInputString } from "openclaw/plugin-sdk/setup";
 import type { CoreConfig, MatrixConfig } from "../types.js";
 import { findMatrixAccountConfig } from "./account-config.js";
 
@@ -7,14 +9,16 @@ export type MatrixAccountPatch = {
   name?: string | null;
   enabled?: boolean;
   homeserver?: string | null;
+  allowPrivateNetwork?: boolean | null;
   userId?: string | null;
-  accessToken?: string | null;
-  password?: string | null;
+  accessToken?: MatrixConfig["accessToken"] | null;
+  password?: MatrixConfig["password"] | null;
   deviceId?: string | null;
   deviceName?: string | null;
   avatarUrl?: string | null;
   encryption?: boolean | null;
   initialSyncLimit?: number | null;
+  allowBots?: MatrixConfig["allowBots"] | null;
   dm?: MatrixConfig["dm"] | null;
   groupPolicy?: MatrixConfig["groupPolicy"] | null;
   groupAllowFrom?: MatrixConfig["groupAllowFrom"] | null;
@@ -40,6 +44,36 @@ function applyNullableStringField(
     return;
   }
   target[key] = trimmed;
+}
+
+function applyNullableSecretInputField(
+  target: Record<string, unknown>,
+  key: "accessToken" | "password",
+  value: MatrixConfig["accessToken"] | MatrixConfig["password"] | null | undefined,
+  defaults?: NonNullable<CoreConfig["secrets"]>["defaults"],
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (value === null) {
+    delete target[key];
+    return;
+  }
+  if (typeof value === "string") {
+    const normalized = normalizeSecretInputString(value);
+    if (normalized) {
+      target[key] = normalized;
+    } else {
+      delete target[key];
+    }
+    return;
+  }
+
+  const ref = coerceSecretRef(value, defaults);
+  if (!ref) {
+    throw new Error(`Invalid Matrix ${key} SecretInput.`);
+  }
+  target[key] = ref;
 }
 
 function cloneMatrixDmConfig(dm: MatrixConfig["dm"]): MatrixConfig["dm"] {
@@ -138,11 +172,24 @@ export function updateMatrixAccountConfig(
 
   applyNullableStringField(nextAccount, "homeserver", patch.homeserver);
   applyNullableStringField(nextAccount, "userId", patch.userId);
-  applyNullableStringField(nextAccount, "accessToken", patch.accessToken);
-  applyNullableStringField(nextAccount, "password", patch.password);
+  applyNullableSecretInputField(
+    nextAccount,
+    "accessToken",
+    patch.accessToken,
+    cfg.secrets?.defaults,
+  );
+  applyNullableSecretInputField(nextAccount, "password", patch.password, cfg.secrets?.defaults);
   applyNullableStringField(nextAccount, "deviceId", patch.deviceId);
   applyNullableStringField(nextAccount, "deviceName", patch.deviceName);
   applyNullableStringField(nextAccount, "avatarUrl", patch.avatarUrl);
+
+  if (patch.allowPrivateNetwork !== undefined) {
+    if (patch.allowPrivateNetwork === null) {
+      delete nextAccount.allowPrivateNetwork;
+    } else {
+      nextAccount.allowPrivateNetwork = patch.allowPrivateNetwork;
+    }
+  }
 
   if (patch.initialSyncLimit !== undefined) {
     if (patch.initialSyncLimit === null) {
@@ -157,6 +204,13 @@ export function updateMatrixAccountConfig(
       delete nextAccount.encryption;
     } else {
       nextAccount.encryption = patch.encryption;
+    }
+  }
+  if (patch.allowBots !== undefined) {
+    if (patch.allowBots === null) {
+      delete nextAccount.allowBots;
+    } else {
+      nextAccount.allowBots = patch.allowBots;
     }
   }
   if (patch.dm !== undefined) {

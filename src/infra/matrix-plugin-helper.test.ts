@@ -1,30 +1,52 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { withTempHome } from "../../test/helpers/temp-home.js";
+import type { OpenClawConfig } from "../config/config.js";
 import {
   isMatrixLegacyCryptoInspectorAvailable,
   loadMatrixLegacyCryptoInspector,
 } from "./matrix-plugin-helper.js";
+import {
+  MATRIX_DEFAULT_DEVICE_ID,
+  MATRIX_DEFAULT_USER_ID,
+  matrixHelperEnv,
+  writeMatrixPluginFixture,
+  writeMatrixPluginManifest,
+} from "./matrix.test-helpers.js";
 
-function writeMatrixPluginFixture(rootDir: string, helperBody: string): void {
-  fs.mkdirSync(rootDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(rootDir, "openclaw.plugin.json"),
-    JSON.stringify({
-      id: "matrix",
-      configSchema: {
-        type: "object",
-        additionalProperties: false,
-      },
+vi.unmock("../version.js");
+
+async function expectLoadedInspector(params: {
+  cfg: OpenClawConfig | Record<string, never>;
+  env: NodeJS.ProcessEnv;
+  expected: {
+    deviceId: string;
+    roomKeyCounts: { total: number; backedUp: number } | null;
+    backupVersion: string | null;
+    decryptionKeyBase64: string | null;
+  };
+}) {
+  expect(isMatrixLegacyCryptoInspectorAvailable({ cfg: params.cfg, env: params.env })).toBe(true);
+  const inspectLegacyStore = await loadMatrixLegacyCryptoInspector({
+    cfg: params.cfg,
+    env: params.env,
+  });
+
+  await expect(
+    inspectLegacyStore({
+      cryptoRootDir: "/tmp/legacy",
+      userId: MATRIX_DEFAULT_USER_ID,
+      deviceId: MATRIX_DEFAULT_DEVICE_ID,
     }),
-    "utf8",
-  );
-  fs.writeFileSync(path.join(rootDir, "index.js"), "export default {};\n", "utf8");
-  fs.writeFileSync(path.join(rootDir, "legacy-crypto-inspector.js"), helperBody, "utf8");
+  ).resolves.toEqual(params.expected);
 }
 
 describe("matrix plugin helper resolution", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("loads the legacy crypto inspector from the bundled matrix plugin", async () => {
     await withTempHome(
       async (home) => {
@@ -40,30 +62,18 @@ describe("matrix plugin helper resolution", () => {
 
         const cfg = {} as const;
 
-        expect(isMatrixLegacyCryptoInspectorAvailable({ cfg, env: process.env })).toBe(true);
-        const inspectLegacyStore = await loadMatrixLegacyCryptoInspector({
+        await expectLoadedInspector({
           cfg,
           env: process.env,
-        });
-
-        await expect(
-          inspectLegacyStore({
-            cryptoRootDir: "/tmp/legacy",
-            userId: "@bot:example.org",
-            deviceId: "DEVICE123",
-          }),
-        ).resolves.toEqual({
-          deviceId: "BUNDLED",
-          roomKeyCounts: { total: 7, backedUp: 6 },
-          backupVersion: "1",
-          decryptionKeyBase64: "YWJjZA==",
+          expected: {
+            deviceId: "BUNDLED",
+            roomKeyCounts: { total: 7, backedUp: 6 },
+            backupVersion: "1",
+            decryptionKeyBase64: "YWJjZA==",
+          },
         });
       },
-      {
-        env: {
-          OPENCLAW_BUNDLED_PLUGINS_DIR: (home) => path.join(home, "bundled"),
-        },
-      },
+      { env: matrixHelperEnv },
     );
   });
 
@@ -89,36 +99,72 @@ describe("matrix plugin helper resolution", () => {
           ].join("\n"),
         );
 
-        const cfg = {
+        const cfg: OpenClawConfig = {
           plugins: {
             load: {
               paths: [customRoot],
             },
           },
-        } as const;
+        };
 
-        expect(isMatrixLegacyCryptoInspectorAvailable({ cfg, env: process.env })).toBe(true);
-        const inspectLegacyStore = await loadMatrixLegacyCryptoInspector({
+        await expectLoadedInspector({
           cfg,
           env: process.env,
+          expected: {
+            deviceId: "CONFIG",
+            roomKeyCounts: null,
+            backupVersion: null,
+            decryptionKeyBase64: null,
+          },
         });
+      },
+      { env: matrixHelperEnv },
+    );
+  });
 
-        await expect(
-          inspectLegacyStore({
-            cryptoRootDir: "/tmp/legacy",
-            userId: "@bot:example.org",
-            deviceId: "DEVICE123",
-          }),
-        ).resolves.toEqual({
-          deviceId: "CONFIG",
-          roomKeyCounts: null,
-          backupVersion: null,
-          decryptionKeyBase64: null,
+  it("keeps source-style root helper shims on the Jiti fallback path", async () => {
+    await withTempHome(
+      async (home) => {
+        const customRoot = path.join(home, "plugins", "matrix-local");
+        writeMatrixPluginManifest(customRoot);
+        fs.mkdirSync(path.join(customRoot, "src", "matrix"), { recursive: true });
+        fs.writeFileSync(
+          path.join(customRoot, "legacy-crypto-inspector.js"),
+          'export { inspectLegacyMatrixCryptoStore } from "./src/matrix/legacy-crypto-inspector.js";\n',
+          "utf8",
+        );
+        fs.writeFileSync(
+          path.join(customRoot, "src", "matrix", "legacy-crypto-inspector.ts"),
+          [
+            "export async function inspectLegacyMatrixCryptoStore() {",
+            '  return { deviceId: "SRCJS", roomKeyCounts: null, backupVersion: null, decryptionKeyBase64: null };',
+            "}",
+          ].join("\n"),
+          "utf8",
+        );
+
+        const cfg: OpenClawConfig = {
+          plugins: {
+            load: {
+              paths: [customRoot],
+            },
+          },
+        };
+
+        await expectLoadedInspector({
+          cfg,
+          env: process.env,
+          expected: {
+            deviceId: "SRCJS",
+            roomKeyCounts: null,
+            backupVersion: null,
+            decryptionKeyBase64: null,
+          },
         });
       },
       {
         env: {
-          OPENCLAW_BUNDLED_PLUGINS_DIR: (home) => path.join(home, "bundled"),
+          OPENCLAW_BUNDLED_PLUGINS_DIR: (home) => path.join(home, "empty-bundled"),
         },
       },
     );
@@ -131,18 +177,7 @@ describe("matrix plugin helper resolution", () => {
         const outsideRoot = path.join(home, "outside");
         fs.mkdirSync(customRoot, { recursive: true });
         fs.mkdirSync(outsideRoot, { recursive: true });
-        fs.writeFileSync(
-          path.join(customRoot, "openclaw.plugin.json"),
-          JSON.stringify({
-            id: "matrix",
-            configSchema: {
-              type: "object",
-              additionalProperties: false,
-            },
-          }),
-          "utf8",
-        );
-        fs.writeFileSync(path.join(customRoot, "index.js"), "export default {};\n", "utf8");
+        writeMatrixPluginManifest(customRoot);
         const outsideHelper = path.join(outsideRoot, "legacy-crypto-inspector.js");
         fs.writeFileSync(
           outsideHelper,
@@ -160,13 +195,13 @@ describe("matrix plugin helper resolution", () => {
           return;
         }
 
-        const cfg = {
+        const cfg: OpenClawConfig = {
           plugins: {
             load: {
               paths: [customRoot],
             },
           },
-        } as const;
+        };
 
         expect(isMatrixLegacyCryptoInspectorAvailable({ cfg, env: process.env })).toBe(false);
         await expect(

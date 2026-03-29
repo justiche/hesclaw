@@ -2,7 +2,6 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { encodeRecoveryKey } from "matrix-js-sdk/lib/crypto-api/recovery-key.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 class FakeMatrixEvent extends EventEmitter {
@@ -176,8 +175,8 @@ function createMatrixJsClientStub(): MatrixJsClientStub {
 let matrixJsClient = createMatrixJsClientStub();
 let lastCreateClientOpts: Record<string, unknown> | null = null;
 
-vi.mock("matrix-js-sdk", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("matrix-js-sdk")>();
+vi.mock("matrix-js-sdk/lib/matrix.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("matrix-js-sdk/lib/matrix.js")>();
   return {
     ...actual,
     ClientEvent: { Event: "event", Room: "Room" },
@@ -189,14 +188,17 @@ vi.mock("matrix-js-sdk", async (importOriginal) => {
   };
 });
 
-import { MatrixClient } from "./sdk.js";
+const { encodeRecoveryKey } = await import("matrix-js-sdk/lib/crypto-api/recovery-key.js");
+let MatrixClient: typeof import("./sdk.js").MatrixClient;
 
 describe("MatrixClient request hardening", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules();
     matrixJsClient = createMatrixJsClientStub();
     lastCreateClientOpts = null;
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    ({ MatrixClient } = await import("./sdk.js"));
   });
 
   afterEach(() => {
@@ -220,16 +222,32 @@ describe("MatrixClient request hardening", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("injects a guarded fetchFn into matrix-js-sdk", () => {
+    new MatrixClient("https://matrix.example.org", "token", undefined, undefined, {
+      ssrfPolicy: { allowPrivateNetwork: true },
+    });
+
+    expect(lastCreateClientOpts).toMatchObject({
+      baseUrl: "https://matrix.example.org",
+      accessToken: "token",
+    });
+    expect(lastCreateClientOpts?.fetchFn).toEqual(expect.any(Function));
+  });
+
   it("prefers authenticated client media downloads", async () => {
     const payload = Buffer.from([1, 2, 3, 4]);
-    const fetchMock = vi.fn(async () => new Response(payload, { status: 200 }));
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => new Response(payload, { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    const client = new MatrixClient("https://matrix.example.org", "token");
+    const client = new MatrixClient("http://127.0.0.1:8008", "token", undefined, undefined, {
+      ssrfPolicy: { allowPrivateNetwork: true },
+    });
     await expect(client.downloadContent("mxc://example.org/media")).resolves.toEqual(payload);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const firstUrl = String(fetchMock.mock.calls[0]?.[0]);
+    const firstUrl = String((fetchMock.mock.calls as unknown[][])[0]?.[0] ?? "");
     expect(firstUrl).toContain("/_matrix/client/v1/media/download/example.org/media");
   });
 
@@ -253,12 +271,14 @@ describe("MatrixClient request hardening", () => {
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    const client = new MatrixClient("https://matrix.example.org", "token");
+    const client = new MatrixClient("http://127.0.0.1:8008", "token", undefined, undefined, {
+      ssrfPolicy: { allowPrivateNetwork: true },
+    });
     await expect(client.downloadContent("mxc://example.org/media")).resolves.toEqual(payload);
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const firstUrl = String(fetchMock.mock.calls[0]?.[0]);
-    const secondUrl = String(fetchMock.mock.calls[1]?.[0]);
+    const firstUrl = String((fetchMock.mock.calls as unknown[][])[0]?.[0] ?? "");
+    const secondUrl = String((fetchMock.mock.calls as unknown[][])[1]?.[0] ?? "");
     expect(firstUrl).toContain("/_matrix/client/v1/media/download/example.org/media");
     expect(secondUrl).toContain("/_matrix/media/v3/download/example.org/media");
   });
@@ -421,16 +441,18 @@ describe("MatrixClient request hardening", () => {
       return new Response("", {
         status: 302,
         headers: {
-          location: "http://evil.example.org/next",
+          location: "https://127.0.0.2:8008/next",
         },
       });
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    const client = new MatrixClient("https://matrix.example.org", "token");
+    const client = new MatrixClient("http://127.0.0.1:8008", "token", undefined, undefined, {
+      ssrfPolicy: { allowPrivateNetwork: true },
+    });
 
     await expect(
-      client.doRequest("GET", "https://matrix.example.org/start", undefined, undefined, {
+      client.doRequest("GET", "http://127.0.0.1:8008/start", undefined, undefined, {
         allowAbsoluteEndpoint: true,
       }),
     ).rejects.toThrow("Blocked cross-protocol redirect");
@@ -446,7 +468,7 @@ describe("MatrixClient request hardening", () => {
       if (calls.length === 1) {
         return new Response("", {
           status: 302,
-          headers: { location: "https://cdn.example.org/next" },
+          headers: { location: "http://127.0.0.2:8008/next" },
         });
       }
       return new Response("{}", {
@@ -456,15 +478,17 @@ describe("MatrixClient request hardening", () => {
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    const client = new MatrixClient("https://matrix.example.org", "token");
-    await client.doRequest("GET", "https://matrix.example.org/start", undefined, undefined, {
+    const client = new MatrixClient("http://127.0.0.1:8008", "token", undefined, undefined, {
+      ssrfPolicy: { allowPrivateNetwork: true },
+    });
+    await client.doRequest("GET", "http://127.0.0.1:8008/start", undefined, undefined, {
       allowAbsoluteEndpoint: true,
     });
 
     expect(calls).toHaveLength(2);
-    expect(calls[0]?.url).toBe("https://matrix.example.org/start");
+    expect(calls[0]?.url).toBe("http://127.0.0.1:8008/start");
     expect(calls[0]?.headers.get("authorization")).toBe("Bearer token");
-    expect(calls[1]?.url).toBe("https://cdn.example.org/next");
+    expect(calls[1]?.url).toBe("http://127.0.0.2:8008/next");
     expect(calls[1]?.headers.get("authorization")).toBeNull();
   });
 
@@ -479,8 +503,9 @@ describe("MatrixClient request hardening", () => {
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    const client = new MatrixClient("https://matrix.example.org", "token", undefined, undefined, {
+    const client = new MatrixClient("http://127.0.0.1:8008", "token", undefined, undefined, {
       localTimeoutMs: 25,
+      ssrfPolicy: { allowPrivateNetwork: true },
     });
 
     const pending = client.doRequest("GET", "/_matrix/client/v3/account/whoami");
@@ -658,6 +683,52 @@ describe("MatrixClient event bridge", () => {
 
     expect(matrixJsClient.decryptEventIfNeeded).toHaveBeenCalledTimes(1);
     expect(failed).toEqual(["missing room key"]);
+    expect(delivered).toEqual(["m.room.message"]);
+  });
+
+  it("can drain pending decrypt retries after sync stops", async () => {
+    vi.useFakeTimers();
+    const client = new MatrixClient("https://matrix.example.org", "token");
+    const delivered: string[] = [];
+
+    client.on("room.message", (_roomId, event) => {
+      delivered.push(event.type);
+    });
+
+    const encrypted = new FakeMatrixEvent({
+      roomId: "!room:example.org",
+      eventId: "$event",
+      sender: "@alice:example.org",
+      type: "m.room.encrypted",
+      ts: Date.now(),
+      content: {},
+      decryptionFailure: true,
+    });
+    const decrypted = new FakeMatrixEvent({
+      roomId: "!room:example.org",
+      eventId: "$event",
+      sender: "@alice:example.org",
+      type: "m.room.message",
+      ts: Date.now(),
+      content: {
+        msgtype: "m.text",
+        body: "hello",
+      },
+    });
+
+    matrixJsClient.decryptEventIfNeeded = vi.fn(async () => {
+      encrypted.emit("decrypted", decrypted);
+    });
+
+    await client.start();
+    matrixJsClient.emit("event", encrypted);
+    encrypted.emit("decrypted", encrypted, new Error("missing room key"));
+
+    client.stopSyncWithoutPersist();
+    await client.drainPendingDecryptions("test shutdown");
+
+    expect(matrixJsClient.stopClient).toHaveBeenCalledTimes(1);
+    expect(matrixJsClient.decryptEventIfNeeded).toHaveBeenCalledTimes(1);
     expect(delivered).toEqual(["m.room.message"]);
   });
 
@@ -974,7 +1045,7 @@ describe("MatrixClient crypto bootstrapping", () => {
     await client.start();
 
     expect(bootstrapSpy).toHaveBeenCalledTimes(2);
-    expect(bootstrapSpy.mock.calls[1]?.[1]).toEqual({
+    expect((bootstrapSpy.mock.calls as unknown[][])[1]?.[1] ?? {}).toEqual({
       forceResetCrossSigning: true,
       strict: true,
     });
@@ -1022,7 +1093,7 @@ describe("MatrixClient crypto bootstrapping", () => {
     await client.start();
 
     expect(bootstrapSpy).toHaveBeenCalledTimes(1);
-    expect(bootstrapSpy.mock.calls[0]?.[1]).toEqual({
+    expect((bootstrapSpy.mock.calls as unknown[][])[0]?.[1] ?? {}).toEqual({
       allowAutomaticCrossSigningReset: false,
     });
   });
@@ -2058,12 +2129,12 @@ describe("MatrixClient crypto bootstrapping", () => {
 
     expect(result.success).toBe(true);
     expect(result.verification.backupVersion).toBe("9");
-    const bootstrapSecretStorageCalls = bootstrapSecretStorage.mock.calls as Array<
-      [{ setupNewKeyBackup?: boolean }?]
-    >;
-    expect(bootstrapSecretStorageCalls.some((call) => Boolean(call[0]?.setupNewKeyBackup))).toBe(
-      false,
-    );
+    const bootstrapSecretStorageCalls = bootstrapSecretStorage.mock.calls as Array<unknown[]>;
+    expect(
+      bootstrapSecretStorageCalls.some((call) =>
+        Boolean((call[0] as { setupNewKeyBackup?: boolean })?.setupNewKeyBackup),
+      ),
+    ).toBe(false);
   });
 
   it("does not report bootstrap errors when final verification state is healthy", async () => {

@@ -55,6 +55,49 @@ describe("updateMatrixAccountConfig", () => {
     expect(updated.channels?.["matrix"]?.accounts?.default?.userId).toBeUndefined();
   });
 
+  it("preserves SecretRef auth inputs when updating config", () => {
+    const updated = updateMatrixAccountConfig({} as CoreConfig, "default", {
+      accessToken: { source: "env", provider: "default", id: "MATRIX_ACCESS_TOKEN" },
+      password: { source: "env", provider: "default", id: "MATRIX_PASSWORD" },
+    });
+
+    expect(updated.channels?.matrix?.accessToken).toEqual({
+      source: "env",
+      provider: "default",
+      id: "MATRIX_ACCESS_TOKEN",
+    });
+    expect(updated.channels?.matrix?.password).toEqual({
+      source: "env",
+      provider: "default",
+      id: "MATRIX_PASSWORD",
+    });
+  });
+
+  it("stores and clears Matrix allowBots and allowPrivateNetwork settings", () => {
+    const cfg = {
+      channels: {
+        matrix: {
+          accounts: {
+            default: {
+              allowBots: true,
+              allowPrivateNetwork: true,
+            },
+          },
+        },
+      },
+    } as CoreConfig;
+
+    const updated = updateMatrixAccountConfig(cfg, "default", {
+      allowBots: "mentions",
+      allowPrivateNetwork: null,
+    });
+
+    expect(updated.channels?.["matrix"]?.accounts?.default).toMatchObject({
+      allowBots: "mentions",
+    });
+    expect(updated.channels?.["matrix"]?.accounts?.default?.allowPrivateNetwork).toBeUndefined();
+  });
+
   it("normalizes account id and defaults account enabled=true", () => {
     const updated = updateMatrixAccountConfig({} as CoreConfig, "Main Bot", {
       name: "Main Bot",

@@ -24,7 +24,6 @@ import {
 import { applyMatrixProfileUpdate, type MatrixProfileUpdateResult } from "./profile-update.js";
 import { formatZonedTimestamp, normalizeAccountId, type ChannelSetupInput } from "./runtime-api.js";
 import { getMatrixRuntime } from "./runtime.js";
-import { maybeBootstrapNewEncryptedMatrixAccount } from "./setup-bootstrap.js";
 import { matrixSetupAdapter } from "./setup-core.js";
 import type { CoreConfig } from "./types.js";
 
@@ -164,6 +163,7 @@ async function addMatrixAccount(params: {
   password?: string;
   deviceName?: string;
   initialSyncLimit?: string;
+  allowPrivateNetwork?: boolean;
   useEnv?: boolean;
 }): Promise<MatrixCliAccountAddResult> {
   const runtime = getMatrixRuntime();
@@ -176,6 +176,7 @@ async function addMatrixAccount(params: {
     name: params.name,
     avatarUrl: params.avatarUrl,
     homeserver: params.homeserver,
+    allowPrivateNetwork: params.allowPrivateNetwork,
     userId: params.userId,
     accessToken: params.accessToken,
     password: params.password,
@@ -213,6 +214,7 @@ async function addMatrixAccount(params: {
     backupVersion: null,
   };
   if (accountConfig.encryption === true) {
+    const { maybeBootstrapNewEncryptedMatrixAccount } = await import("./setup-bootstrap.js");
     verificationBootstrap = await maybeBootstrapNewEncryptedMatrixAccount({
       previousCfg: cfg,
       cfg: updated,
@@ -673,6 +675,10 @@ export function registerMatrixCli(params: { program: Command }): void {
     .option("--name <name>", "Optional display name for this account")
     .option("--avatar-url <url>", "Optional Matrix avatar URL (mxc:// or http(s) URL)")
     .option("--homeserver <url>", "Matrix homeserver URL")
+    .option(
+      "--allow-private-network",
+      "Allow Matrix homeserver traffic to private/internal hosts for this account",
+    )
     .option("--user-id <id>", "Matrix user ID")
     .option("--access-token <token>", "Matrix access token")
     .option("--password <password>", "Matrix password")
@@ -690,6 +696,7 @@ export function registerMatrixCli(params: { program: Command }): void {
         name?: string;
         avatarUrl?: string;
         homeserver?: string;
+        allowPrivateNetwork?: boolean;
         userId?: string;
         accessToken?: string;
         password?: string;
@@ -708,6 +715,7 @@ export function registerMatrixCli(params: { program: Command }): void {
               name: options.name,
               avatarUrl: options.avatarUrl,
               homeserver: options.homeserver,
+              allowPrivateNetwork: options.allowPrivateNetwork === true,
               userId: options.userId,
               accessToken: options.accessToken,
               password: options.password,

@@ -5,7 +5,6 @@ import {
   type ChannelSetupAdapter,
 } from "openclaw/plugin-sdk/setup";
 import { updateMatrixAccountConfig } from "./matrix/config-update.js";
-import { runMatrixSetupBootstrapAfterConfigWrite } from "./setup-bootstrap.js";
 import { applyMatrixSetupAccountConfig, validateMatrixSetupInput } from "./setup-config.js";
 import type { CoreConfig } from "./types.js";
 
@@ -19,6 +18,7 @@ export function buildMatrixConfigUpdate(
   cfg: CoreConfig,
   input: {
     homeserver?: string;
+    allowPrivateNetwork?: boolean;
     userId?: string;
     accessToken?: string;
     password?: string;
@@ -29,6 +29,7 @@ export function buildMatrixConfigUpdate(
   return updateMatrixAccountConfig(cfg, DEFAULT_ACCOUNT_ID, {
     enabled: true,
     homeserver: input.homeserver,
+    allowPrivateNetwork: input.allowPrivateNetwork,
     userId: input.userId,
     accessToken: input.accessToken,
     password: input.password,
@@ -63,6 +64,7 @@ export const matrixSetupAdapter: ChannelSetupAdapter = {
       input,
     }),
   afterAccountConfigWritten: async ({ previousCfg, cfg, accountId, runtime }) => {
+    const { runMatrixSetupBootstrapAfterConfigWrite } = await import("./setup-bootstrap.js");
     await runMatrixSetupBootstrapAfterConfigWrite({
       previousCfg: previousCfg as CoreConfig,
       cfg: cfg as CoreConfig,
